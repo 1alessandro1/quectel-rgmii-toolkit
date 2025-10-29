@@ -265,8 +265,8 @@ Conflicts: sdxpinn-quecmanager
 Section: admin
 Architecture: sdxpinn
 Maintainer: Russel Yasol <https://github.com/dr-dolomite> Cameron Thompson <https://github.com/iamromulan>
-MD5Sum: 46a14947ef0c56aa2ac795d63081c013
-Size: 1585216
+MD5Sum: 075cba0ef3c64af235f7f628f92065fe
+Size: 1584614
 Filename: sdxpinn-quecmanager-beta_2.3.5_sdxpinn.ipk
 Source: github/iamromulan
 Description: BETA: A custom web UI desgined to run alongside luci for Quectel RM55x modems
