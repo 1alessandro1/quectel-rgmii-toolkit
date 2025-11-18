@@ -3,10 +3,12 @@
 
 echo "Stopping any running QuecManager Services..."
 
-service quecmanager_services stop
 service quecmanager_cell_locking stop
 service quecprofiles stop
 service quecwatch stop
+service quecmanager_connection_monitor stop
+service quecmanager_services stop
+service websocat_setup stop
 service quecmanager_logging stop
 
 echo "Cleanup complete."
