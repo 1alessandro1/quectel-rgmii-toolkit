@@ -4,6 +4,12 @@
 mv /www/index.html /www/index.html.old
 cp /www/login.html /www/index.html
 
+service quecmanager_logging enable
+service quecmanager_logging start
+
+service websocat_setup enable
+service websocat_setup start
+
 service quecmanager_services enable
 service quecmanager_services start
 
@@ -15,9 +21,6 @@ service quecprofiles start
 
 service quecwatch enable
 service quecwatch start
-
-service quecmanager_logging enable
-service quecmanager_logging start
 
 exit 0
 
