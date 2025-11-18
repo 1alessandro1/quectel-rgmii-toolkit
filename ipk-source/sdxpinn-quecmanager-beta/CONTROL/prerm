@@ -2,9 +2,6 @@
 
 # Disable and remove services
 
-service quecmanager_services stop
-service quecmanager_services disable
-
 service quecmanager_cell_locking stop
 service quecmanager_cell_locking disable
 
@@ -14,9 +11,17 @@ service quecprofiles disable
 service quecwatch stop
 service quecwatch disable
 
+service quecmanager_connection_monitor stop
+service quecmanager_connection_monitor disable
+
+service quecmanager_services stop
+service quecmanager_services disable
+
+service websocat_setup stop
+service websocat_setup disable
+
 service quecmanager_logging stop
 service quecmanager_logging disable
 
 echo "Cleanup complete."
 exit 0
-
