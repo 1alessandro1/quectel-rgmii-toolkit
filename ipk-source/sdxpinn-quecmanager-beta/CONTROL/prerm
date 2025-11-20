@@ -17,8 +17,8 @@ service quecmanager_connection_monitor disable
 service quecmanager_services stop
 service quecmanager_services disable
 
-service websocat_setup stop
-service websocat_setup disable
+service quecmanager_websocat stop
+service quecmanager_websocat disable
 
 service quecmanager_logging stop
 service quecmanager_logging disable

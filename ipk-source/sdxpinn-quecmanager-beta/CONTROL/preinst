@@ -8,7 +8,7 @@ service quecprofiles stop
 service quecwatch stop
 service quecmanager_connection_monitor stop
 service quecmanager_services stop
-service websocat_setup stop
+service quecmanager_websocat stop
 service quecmanager_logging stop
 
 echo "Cleanup complete."
