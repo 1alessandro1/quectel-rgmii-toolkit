@@ -244,15 +244,15 @@ Description: A general first system patch for SDXPINN OpenWRT
 
 
 Package: sdxpinn-quecmanager
-Version: 2.3.1
+Version: 2.3.4
 Depends: sdxpinn-patch (>= 2.5), libc, inotifywait, coreutils-timeout, uhttpd, sms-tool (>= 2025.1.19-APmod-iamromulan), jq, ookla-speedtest
 Conflicts: sdxpinn-quecmanager-beta
 Section: admin
 Architecture: sdxpinn
 Maintainer: Russel Yasol <https://github.com/dr-dolomite> Cameron Thompson <https://github.com/iamromulan>
-MD5Sum: d4fed05bc9f2267462f0ce48cf6865b7
-Size: 1182792
-Filename: sdxpinn-quecmanager_2.3.1_sdxpinn.ipk
+MD5Sum: 57c8459f23120ce906102157615e9bbc
+Size: 1535891
+Filename: sdxpinn-quecmanager_2.3.4_sdxpinn.ipk
 Source: github/iamromulan
 Description: A custom web UI desgined to run alongside luci for Quectel RM55x modems
 License: GPLv3
