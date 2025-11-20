@@ -1,9 +1,10 @@
 #!/bin/sh
 
 # Ping Settings Configuration Script
-# Manages ping service (enable/disable) and daemon settings
+# Manages ping service (enable/disable) and daemon settings with dynamic service management
+# Uses UCI configuration for OpenWRT integration
 # Author: dr-dolomite
-# Date: 2025-08-04
+# Date: 2025-10-03
 
 # Handle OPTIONS request first (before any headers)
 if [ "${REQUEST_METHOD:-GET}" = "OPTIONS" ]; then
@@ -24,14 +25,10 @@ echo "Access-Control-Allow-Headers: Content-Type"
 echo ""
 
 # Configuration
-CONFIG_DIR="/etc/quecmanager/settings"
-CONFIG_FILE="$CONFIG_DIR/ping_settings.conf"
-FALLBACK_CONFIG_DIR="/tmp/quecmanager/settings"
-FALLBACK_CONFIG_FILE="$FALLBACK_CONFIG_DIR/ping_settings.conf"
 LOG_FILE="/tmp/ping_settings.log"
-PID_FILE="/tmp/quecmanager/ping_daemon.pid"
-# Prefer the new services location, fall back to the legacy path for compatibility
-DAEMON_RELATIVE_PATHS="/cgi-bin/services/ping_daemon.sh"
+SERVICES_INIT="/etc/init.d/quecmanager_services"
+UCI_CONFIG="quecmanager"
+UCI_SECTION="ping_daemon"
 
 # Logging function
 log_message() {
@@ -59,163 +56,213 @@ send_success() {
     fi
 }
 
-# Resolve config file for reading: prefer primary, then fallback
-resolve_config_for_read() {
-    if [ -f "$CONFIG_FILE" ]; then
-        return 0
-    elif [ -f "$FALLBACK_CONFIG_FILE" ]; then
-        CONFIG_FILE="$FALLBACK_CONFIG_FILE"
-        CONFIG_DIR="$FALLBACK_CONFIG_DIR"
-        return 0
-    fi
-    # Default to primary path if none exist
-    return 0
-}
-
-# Determine daemon path (absolute) based on typical web root layouts
-resolve_daemon_path() {
-    # Common locations where CGI/WWW is mounted
-    for rel in $DAEMON_RELATIVE_PATHS; do
-        for base in \
-            /www \
-            /; do
-            if [ -x "$base$rel" ]; then
-                echo "$base$rel"
-                return 0
-            fi
-        done
-        # Also try as-is if busybox httpd cwd matches web root
-        if [ -x "$rel" ]; then
-            echo "$rel"
-            return 0
-        fi
-    done
-    # Nothing found; return first candidate as a best-effort path
-    set -- $DAEMON_RELATIVE_PATHS
-    echo "$1"
-}
-
-daemon_running() {
-    if [ -f "$PID_FILE" ]; then
-        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-        if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-start_daemon() {
-    # Ensure /tmp/quecmanager exists for PID
-    [ -d "/tmp/quecmanager" ] || mkdir -p "/tmp/quecmanager"
-
-    if daemon_running; then
-        log_message "Daemon already running"
-        return 0
-    fi
-
-    local daemon_path
-    daemon_path="$(resolve_daemon_path)"
-    if [ ! -x "$daemon_path" ]; then 
-        # Try to make it executable if present
-        if [ -f "$daemon_path" ]; then
-            chmod +x "$daemon_path" 2>/dev/null || true
-        fi
-    fi
-
-    if [ -x "$daemon_path" ]; then
-        nohup "$daemon_path" >/dev/null 2>&1 &
-        log_message "Started ping daemon: $daemon_path (pid $!)"
-        return 0
-    else
-        log_message "Daemon script not found or not executable: $daemon_path"
-        return 1
+# Initialize UCI configuration
+init_uci_config() {
+    # Ensure quecmanager config exists
+    touch /etc/config/quecmanager 2>/dev/null || true
+    
+    # Create section if it doesn't exist
+    if ! uci -q get quecmanager.ping_daemon >/dev/null 2>&1; then
+        uci set quecmanager.ping_daemon=service
+        uci commit quecmanager
+        log_message "Initialized UCI config section"
     fi
 }
 
-stop_daemon() {
-    if daemon_running; then
-        pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-        if [ -n "${pid:-}" ]; then
-            kill "$pid" 2>/dev/null || true
-            sleep 0.2
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    fi
-    rm -f "$PID_FILE" 2>/dev/null || true
+# Check if ping daemon is running
+is_ping_daemon_running() {
+    pgrep -f "ping_daemon.sh" >/dev/null 2>&1
 }
 
-# Get current ping setting
+# Get current ping setting from UCI
 get_config_values() {
-    # defaults
-    ENABLED="true"
+    # Defaults
+    ENABLED="false"
     HOST="8.8.8.8"
     INTERVAL="5"
+    IS_DEFAULT="true"
 
-    resolve_config_for_read
-    if [ -f "$CONFIG_FILE" ]; then
-        val=$(grep -E "^PING_ENABLED=" "$CONFIG_FILE" | tail -n1 | cut -d'=' -f2)
-        if [ -n "${val:-}" ]; then
-            case "$val" in
-                true|1|on|yes|enabled) ENABLED="true" ;;
-                *) ENABLED="false" ;;
-            esac
-        fi
-        val=$(grep -E "^PING_HOST=" "$CONFIG_FILE" | tail -n1 | cut -d'=' -f2)
-        [ -n "${val:-}" ] && HOST="$val"
-        val=$(grep -E "^PING_INTERVAL=" "$CONFIG_FILE" | tail -n1 | cut -d'=' -f2)
-        if echo "${val:-}" | grep -qE '^[0-9]+$'; then
-            INTERVAL="$val"
-        fi
+    # Initialize UCI if needed
+    init_uci_config
+
+    # Read from UCI
+    local uci_enabled=$(uci -q get quecmanager.ping_daemon.enabled)
+    if [ -n "$uci_enabled" ]; then
+        case "$uci_enabled" in
+            1|true|on|yes|enabled) ENABLED="true" ;;
+            *) ENABLED="false" ;;
+        esac
+        IS_DEFAULT="false"
+    fi
+
+    local uci_host=$(uci -q get quecmanager.ping_daemon.host)
+    if [ -n "$uci_host" ]; then
+        HOST="$uci_host"
+        IS_DEFAULT="false"
+    fi
+
+    local uci_interval=$(uci -q get quecmanager.ping_daemon.interval)
+    if [ -n "$uci_interval" ] && echo "$uci_interval" | grep -qE '^[0-9]+$'; then
+        INTERVAL="$uci_interval"
+        IS_DEFAULT="false"
     fi
 }
 
-# Save ping setting to config file
+# Save ping setting to UCI
 save_config() {
     local enabled="$1"
     local host="$2"
     local interval="$3"
 
-    # Try primary directory first
-    if mkdir -p "$CONFIG_DIR" 2>/dev/null; then
-        local tmp="$CONFIG_FILE.tmp.$$"
-        echo "PING_ENABLED=$enabled" > "$tmp" || rm -f "$tmp" || return 1
-        echo "PING_HOST=$host" >> "$tmp" || rm -f "$tmp" || return 1
-        echo "PING_INTERVAL=$interval" >> "$tmp" || rm -f "$tmp" || return 1
-        if mv -f "$tmp" "$CONFIG_FILE" 2>/dev/null; then
-            chmod 644 "$CONFIG_FILE" 2>/dev/null || true
-            log_message "Saved ping config (primary): enabled=$enabled host=$host interval=$interval"
-            return 0
-        fi
+    # Initialize UCI if needed
+    init_uci_config
+
+    # Convert boolean to UCI format (1/0)
+    local uci_enabled="0"
+    [ "$enabled" = "true" ] && uci_enabled="1"
+
+    # Set UCI values
+    uci set quecmanager.ping_daemon.enabled="$uci_enabled"
+    uci set quecmanager.ping_daemon.host="$host"
+    uci set quecmanager.ping_daemon.interval="$interval"
+
+    # Commit changes
+    if ! uci commit quecmanager; then
+        log_message "ERROR: Failed to commit UCI changes"
+        return 1
     fi
 
-    # Fallback to /tmp
-    mkdir -p "$FALLBACK_CONFIG_DIR" 2>/dev/null || true
-    local tmp2="$FALLBACK_CONFIG_FILE.tmp.$$"
-    echo "PING_ENABLED=$enabled" > "$tmp2" || rm -f "$tmp2" || return 1
-    echo "PING_HOST=$host" >> "$tmp2" || rm -f "$tmp2" || return 1
-    echo "PING_INTERVAL=$interval" >> "$tmp2" || rm -f "$tmp2" || return 1
-    mv -f "$tmp2" "$FALLBACK_CONFIG_FILE" 2>/dev/null || return 1
-    chmod 644 "$FALLBACK_CONFIG_FILE" 2>/dev/null || true
-    # Point CONFIG_FILE to fallback for subsequent reads in this request
-    CONFIG_FILE="$FALLBACK_CONFIG_FILE"; CONFIG_DIR="$FALLBACK_CONFIG_DIR"
-    log_message "Saved ping config (fallback): enabled=$enabled host=$host interval=$interval"
+    log_message "Saved ping config via UCI: enabled=$enabled host=$host interval=$interval"
+    return 0
 }
 
-# Delete ping configuration (reset to default)
+# Add ping daemon to services init script (remove the static version and add dynamic version)
+add_ping_daemon_to_services() {
+    if [ ! -f "$SERVICES_INIT" ]; then
+        log_message "Services init file not found: $SERVICES_INIT"
+        return 1
+    fi
+
+    # First, remove any existing ping daemon block (both static and dynamic)
+    remove_ping_daemon_from_services
+
+    # Add the dynamic ping daemon block before "All QuecManager services Started"
+    local temp_file="/tmp/services_temp_$$"
+    
+    awk '
+    /echo "All QuecManager services Started"/ {
+        print "    # Start ping daemon"
+        print "    echo \"Starting Ping Daemon...\""
+        print "    procd_open_instance"
+        print "    procd_set_param command /www/cgi-bin/services/ping_daemon.sh"
+        print "    procd_set_param respawn"
+        print "    procd_set_param stdout 1"
+        print "    procd_set_param stderr 1"
+        print "    procd_close_instance"
+        print "    echo \"Ping Daemon started\""
+        print ""
+    }
+    { print }
+    ' "$SERVICES_INIT" > "$temp_file"
+
+    if [ -s "$temp_file" ]; then
+        mv "$temp_file" "$SERVICES_INIT"
+        chmod +x "$SERVICES_INIT"
+        log_message "Added ping daemon to services init script"
+        return 0
+    else
+        rm -f "$temp_file"
+        log_message "Failed to add ping daemon to services"
+        return 1
+    fi
+}
+
+# Remove ping daemon from services init script (both static and dynamic versions)
+remove_ping_daemon_from_services() {
+    if [ ! -f "$SERVICES_INIT" ]; then
+        log_message "Services init file not found: $SERVICES_INIT"
+        return 1
+    fi
+
+    local temp_file="/tmp/services_temp_$$"
+    
+    # Remove both the old static ping daemon block and any dynamic ping daemon block
+    awk '
+    # Skip the old static ping daemon block
+    /# Start ping daemon if enabled in configuration/ { 
+        skip_static=1
+        next 
+    }
+    skip_static && /echo "Ping Daemon started"/ { 
+        skip_static=0
+        next 
+    }
+    skip_static && /echo "Ping configuration not found/ { 
+        skip_static=0
+        next 
+    }
+    skip_static { next }
+    
+    # Skip the new dynamic ping daemon block
+    /# Start ping daemon$/ { 
+        skip_dynamic=1
+        next 
+    }
+    skip_dynamic && /^$/ { 
+        skip_dynamic=0
+        next 
+    }
+    skip_dynamic { next }
+    
+    # Print everything else
+    !skip_static && !skip_dynamic { print }
+    ' "$SERVICES_INIT" > "$temp_file"
+
+    if [ -s "$temp_file" ]; then
+        mv "$temp_file" "$SERVICES_INIT"
+        chmod +x "$SERVICES_INIT"
+        log_message "Removed ping daemon from services init script"
+        return 0
+    else
+        rm -f "$temp_file"
+        log_message "Failed to remove ping daemon from services"
+        return 1
+    fi
+}
+
+# Restart QuecManager services
+restart_services() {
+    log_message "Restarting QuecManager services..."
+    
+    # Stop services
+    if [ -x "$SERVICES_INIT" ]; then
+        "$SERVICES_INIT" stop >/dev/null 2>&1
+        sleep 2
+        "$SERVICES_INIT" start >/dev/null 2>&1
+        log_message "Services restarted successfully"
+        return 0
+    else
+        log_message "Cannot restart services - init script not found or not executable"
+        return 1
+    fi
+}
+
+# Delete ping configuration (reset to default) - removes UCI section
 delete_ping_setting() {
-    local removed=1
-    for f in "$CONFIG_FILE" "$FALLBACK_CONFIG_FILE"; do
-        if [ -f "$f" ]; then
-            sed -i '/^PING_ENABLED=/d' "$f" 2>/dev/null || true
-            sed -i '/^PING_HOST=/d' "$f" 2>/dev/null || true
-            sed -i '/^PING_INTERVAL=/d' "$f" 2>/dev/null || true
-            log_message "Deleted ping configuration entries in $f"
-            [ -s "$f" ] || { rm -f "$f" 2>/dev/null || true; log_message "Removed empty config file $f"; }
-            removed=0
+    # Check if section exists
+    if uci -q get quecmanager.ping_daemon >/dev/null 2>&1; then
+        # Delete the entire section
+        uci delete quecmanager.ping_daemon
+        if uci commit quecmanager; then
+            log_message "Deleted ping_daemon UCI section"
+            return 0
+        else
+            log_message "ERROR: Failed to commit UCI deletion"
+            return 1
         fi
-    done
-    return $removed
+    fi
+    log_message "No ping_daemon UCI section to delete"
+    return 0
 }
 
 # Handle GET request - Retrieve ping setting
@@ -223,12 +270,8 @@ handle_get() {
     log_message "GET request received"
     get_config_values
     local running=false
-    if daemon_running; then running=true; fi
-    local is_default=true
-    if [ -f "$CONFIG_FILE" ] && grep -q "^PING_ENABLED=" "$CONFIG_FILE"; then
-        is_default=false
-    fi
-    send_success "Ping configuration retrieved" "{\"enabled\":$ENABLED,\"host\":\"$HOST\",\"interval\":$INTERVAL,\"running\":$running,\"isDefault\":$is_default}"
+    if is_ping_daemon_running; then running=true; fi
+    send_success "Ping configuration retrieved" "{\"enabled\":$ENABLED,\"host\":\"$HOST\",\"interval\":$INTERVAL,\"running\":$running,\"isDefault\":$IS_DEFAULT}"
 }
 
 # Handle POST request - Update ping setting
@@ -264,35 +307,34 @@ handle_post() {
             send_error "INVALID_INTERVAL" "Interval must be between 1 and 3600 seconds."
         fi
 
-        # Capture previous values to decide on restart
+        # Get current config to compare
         get_config_values
         local prev_enabled="$ENABLED"
         local prev_host="$HOST"
         local prev_interval="$INTERVAL"
 
+        # Save new configuration
         save_config "$enabled" "$host" "$interval" || send_error "WRITE_FAILED" "Failed to save configuration"
 
+        # Handle service changes using dynamic management like memory
         if [ "$enabled" = "true" ]; then
-            if daemon_running; then
-                # Restart only if effective parameters changed
-                if [ "$prev_host" != "$host" ] || [ "$prev_interval" != "$interval" ] || [ "$prev_enabled" != "$enabled" ]; then
-                    log_message "Config change detected (host/interval/enabled). Restarting daemon."
-                    stop_daemon
-                    start_daemon || log_message "Failed to restart daemon"
-                else
-                    log_message "No change requiring restart; daemon remains running"
-                fi
-            else
-                start_daemon || log_message "Failed to start daemon"
+            # Enable ping daemon
+            add_ping_daemon_to_services
+            if [ "$prev_enabled" != "true" ] || [ "$prev_host" != "$host" ] || [ "$prev_interval" != "$interval" ]; then
+                restart_services
             fi
         else
-            stop_daemon
+            # Disable ping daemon
+            remove_ping_daemon_from_services
+            restart_services
         fi
 
-        get_config_values
+        # Return current status
+        sleep 1  # Give services time to start/stop
         local running=false
-        if daemon_running; then running=true; fi
-        send_success "Ping setting updated successfully" "{\"enabled\":$ENABLED,\"host\":\"$HOST\",\"interval\":$INTERVAL,\"running\":$running}"
+        if is_ping_daemon_running; then running=true; fi
+
+        send_success "Ping setting updated successfully" "{\"enabled\":$enabled,\"host\":\"$host\",\"interval\":$interval,\"running\":$running}"
     else
         send_error "NO_DATA" "No data provided"
     fi
@@ -301,13 +343,15 @@ handle_post() {
 # Handle DELETE request - Reset to default (delete configuration)
 handle_delete() {
     log_message "DELETE request received"
-    stop_daemon
-    if delete_ping_setting; then
-        # Default is enabled
-        send_success "Ping setting reset to default" "{\"enabled\":true,\"isDefault\":true,\"running\":false}"
-    else
-        send_error "NOT_FOUND" "Ping setting configuration not found"
-    fi
+    
+    # Remove ping daemon from services and restart
+    remove_ping_daemon_from_services
+    restart_services
+    
+    # Remove config files
+    delete_ping_setting
+    
+    send_success "Ping setting reset to default (disabled)" "{\"enabled\":false,\"running\":false,\"isDefault\":true}"
 }
 
 # Main execution
