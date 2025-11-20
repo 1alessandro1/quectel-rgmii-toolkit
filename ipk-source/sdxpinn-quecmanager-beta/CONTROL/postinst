@@ -7,8 +7,8 @@ cp /www/login.html /www/index.html
 service quecmanager_logging enable
 service quecmanager_logging start
 
-service websocat_setup enable
-service websocat_setup start
+service quecmanager_websocat enable
+service quecmanager_websocat start
 
 service quecmanager_services enable
 service quecmanager_services start
