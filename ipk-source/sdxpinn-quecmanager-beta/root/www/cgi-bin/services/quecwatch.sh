@@ -7,7 +7,7 @@
 . /lib/functions.sh
 
 # Load centralized logging
-LOGGER_SCRIPT="/www/cgi-bin/quecmanager/services/quecmanager_logger.sh"
+LOGGER_SCRIPT="/www/cgi-bin/services/quecmanager_logger.sh"
 if [ -f "$LOGGER_SCRIPT" ]; then
     . "$LOGGER_SCRIPT"
     USE_CENTRALIZED_LOGGING=1
@@ -15,15 +15,18 @@ else
     USE_CENTRALIZED_LOGGING=0
 fi
 
+# Logging constants
+SCRIPT_NAME="quecwatch"
+LOG_CATEGORY="service"
+
 # Configuration
 QUEUE_DIR="/tmp/at_queue"
 TOKEN_FILE="$QUEUE_DIR/token"
 TOKEN_LOCK_DIR="$QUEUE_DIR/token.lock"
-LOG_DIR="/tmp/log/quecwatch"
-LOG_FILE="$LOG_DIR/quecwatch.log"
 PID_FILE="/var/run/quecwatch.pid"
 STATUS_FILE="/tmp/quecwatch_status.json"
 RETRY_COUNT_FILE="/tmp/quecwatch_retry_count"
+QUECWATCH_EVENTS_FILE="/tmp/quecwatch_events.json"
 UCI_CONFIG="quecmanager"
 MAX_TOKEN_ATTEMPTS=10  # Maximum attempts to acquire token
 TOKEN_TIMEOUT=30       # Token timeout in seconds
@@ -31,7 +34,7 @@ TOKEN_LOCK_TIMEOUT=100 # 10 seconds for token lock acquisition
 TOKEN_PRIORITY=15      # Medium priority (between profiles and metrics)
 
 # Ensure directories exist
-mkdir -p "$LOG_DIR" "$QUEUE_DIR"
+mkdir -p "$QUEUE_DIR"
 
 # Store PID
 echo "$$" > "$PID_FILE"
@@ -42,30 +45,58 @@ log_message() {
     local message="$1"
     local level="${2:-info}"
     
-    # Use centralized logging if available
+    # Use centralized logging
     if [ "$USE_CENTRALIZED_LOGGING" -eq 1 ]; then
         case "$level" in
             error)
-                qm_log_error "service" "quecwatch" "$message"
+                qm_log_error "$LOG_CATEGORY" "$SCRIPT_NAME" "$message"
                 ;;
             warn)
-                qm_log_warn "service" "quecwatch" "$message"
+                qm_log_warn "$LOG_CATEGORY" "$SCRIPT_NAME" "$message"
                 ;;
             debug)
-                qm_log_debug "service" "quecwatch" "$message"
+                qm_log_debug "$LOG_CATEGORY" "$SCRIPT_NAME" "$message"
                 ;;
             info|*)
-                qm_log_info "service" "quecwatch" "$message"
+                qm_log_info "$LOG_CATEGORY" "$SCRIPT_NAME" "$message"
                 ;;
         esac
+    else
+        # Fallback to system log only if centralized logging not available
+        logger -t quecwatch -p "daemon.$level" "$message"
+    fi
+}
+
+# Function to log Quecwatch event for Network Insights
+log_quecwatch_event() {
+    local action="$1"
+    local reason="$2"
+    local latency="${3:-$CURRENT_LATENCY}"
+    
+    # Initialize file if it doesn't exist
+    if [ ! -f "$QUECWATCH_EVENTS_FILE" ]; then
+        echo "[]" > "$QUECWATCH_EVENTS_FILE"
+        chmod 644 "$QUECWATCH_EVENTS_FILE"
     fi
     
-    # Also log to legacy file for backward compatibility
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    # Get current datetime in ISO format
+    local datetime=$(date -u +"%Y-%m-%d %H:%M:%S" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
     
-    # Log to system log
-    logger -t quecwatch -p "daemon.$level" "$message"
+    # Add event to JSON file using jq, keep only last 50 events
+    local temp_file="${QUECWATCH_EVENTS_FILE}.tmp.$$"
+    if command -v jq >/dev/null 2>&1; then
+        jq --arg dt "$datetime" \
+           --arg act "$action" \
+           --arg rsn "$reason" \
+           --arg lat "$latency" \
+           '. + [{"datetime": $dt, "action": $act, "reason": $rsn, "latency": $lat}] | .[-50:]' \
+           "$QUECWATCH_EVENTS_FILE" > "$temp_file" 2>/dev/null && mv "$temp_file" "$QUECWATCH_EVENTS_FILE"
+    else
+        # Fallback without jq - simple append
+        echo "{\"datetime\":\"$datetime\",\"action\":\"$action\",\"reason\":\"$reason\",\"latency\":\"$latency\"}" >> "$QUECWATCH_EVENTS_FILE"
+    fi
+    
+    log_message "Logged Quecwatch event: $action - $reason (latency: ${latency}ms)" "debug"
 }
 
 # Function to update status
@@ -469,7 +500,7 @@ switch_sim_card() {
     
     # Detach from network
     log_message "Detaching from network" "debug"
-    execute_at_command "AT+COPS=2" 10 "$token_id"
+    execute_at_command "AT+CFUN=0" 10 "$token_id"
     sleep 2
     
     # Switch SIM slot
@@ -488,7 +519,7 @@ switch_sim_card() {
     
     # Reattach to network
     log_message "Reattaching to network" "debug"
-    execute_at_command "AT+COPS=0" 10 "$token_id"
+    execute_at_command "AT+CFUN=1" 10 "$token_id"
     
     # Release token
     release_token "$token_id"
@@ -512,11 +543,15 @@ perform_connection_recovery() {
     log_message "Starting connection recovery" "info"
     update_status "recovering" "Connection recovery in progress - monitoring paused" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
     
+    # Log event for Network Insights
+    log_quecwatch_event "Connection Refresh Started" "High latency detected: ${CURRENT_LATENCY}ms" "$CURRENT_LATENCY"
+    
     # Get token for AT commands
     token_id=$(acquire_token)
     if [ -z "$token_id" ]; then
         log_message "Failed to acquire token for connection recovery" "error"
         update_status "error" "Failed to acquire token for recovery" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+        log_quecwatch_event "Connection Refresh Failed" "Failed to acquire AT command token" "$CURRENT_LATENCY"
         return 1
     fi
 
@@ -550,25 +585,25 @@ perform_connection_recovery() {
         sleep 2
     fi
     
-    # Detach from network
-    log_message "Detaching from network" "debug"
+    # Detach from network using CFUN
+    log_message "Detaching from network (CFUN=0)" "debug"
     update_status "recovering" "Detaching from network" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-    execute_at_command "AT+COPS=2" 10 "$token_id"
-    sleep 2
+    execute_at_command "AT+CFUN=0" 10 "$token_id"
+    sleep 3
     
-    # Reattach to network
-    log_message "Reattaching to network" "debug"
+    # Reattach to network using CFUN
+    log_message "Reattaching to network (CFUN=1)" "debug"
     update_status "recovering" "Reattaching to network" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-    execute_at_command "AT+COPS=0" 15 "$token_id"
-    sleep 1
+    execute_at_command "AT+CFUN=1" 15 "$token_id"
     
     # Release token
     release_token "$token_id"
     
-    # Wait for network to stabilize before verification
-    log_message "Waiting for network to stabilize (10 seconds)" "debug"
-    update_status "recovering" "Waiting for network to stabilize" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-    sleep 10
+    # Wait longer for network to fully stabilize after CFUN=1
+    # Network registration and data connection can take 15-30 seconds
+    log_message "Waiting for network to fully stabilize (30 seconds)" "debug"
+    update_status "recovering" "Waiting for network registration and data connection" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+    sleep 30
     
     # Verify recovery with appropriate check
     log_message "Verifying connection recovery" "debug"
@@ -594,6 +629,9 @@ perform_connection_recovery() {
         log_message "Connection recovery successful" "info"
         update_status "recovered" "Connection recovery successful" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
         
+        # Log successful recovery event for Network Insights
+        log_quecwatch_event "Connection Refresh Completed" "Recovery successful, latency improved to ${CURRENT_LATENCY}ms" "$CURRENT_LATENCY"
+        
         # Add grace period after successful recovery
         log_message "Grace period: waiting 20 seconds before resuming monitoring" "debug"
         sleep 20
@@ -602,13 +640,17 @@ perform_connection_recovery() {
     else
         log_message "Connection recovery failed" "error"
         update_status "error" "Connection recovery failed" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+        
+        # Log failed recovery event for Network Insights
+        log_quecwatch_event "Connection Refresh Failed" "Recovery verification failed" "$CURRENT_LATENCY"
+        
         return 1
     fi
 }
 
 # Load configuration
 load_config() {
-    # Initialize variables
+    # Initialize variables with sensible defaults
     PING_TARGET=""
     PING_INTERVAL=60
     PING_FAILURES=3
@@ -620,7 +662,7 @@ load_config() {
     SIM_FAILOVER_SCHEDULE=0
     HIGH_LATENCY_MONITORING=0
     LATENCY_CEILING=150
-    LATENCY_FAILURES=""
+    LATENCY_FAILURES=3
     CURRENT_LATENCY=0
     LATENCY_FAILURE_COUNT=0
     
@@ -649,6 +691,12 @@ load_config() {
     
     config_get LATENCY_CEILING quecwatch latency_ceiling 150
     config_get LATENCY_FAILURES quecwatch latency_failures 3
+    
+    # Ensure LATENCY_FAILURES is a valid number (safeguard against empty/invalid values)
+    if [ -z "$LATENCY_FAILURES" ] || ! [ "$LATENCY_FAILURES" -eq "$LATENCY_FAILURES" ] 2>/dev/null; then
+        log_message "Invalid LATENCY_FAILURES value '$LATENCY_FAILURES', defaulting to 3" "warn"
+        LATENCY_FAILURES=3
+    fi
     
     # Debug logging for latency configuration
     log_message "Loaded latency configuration: HIGH_LATENCY_MONITORING=$HIGH_LATENCY_MONITORING, LATENCY_CEILING=$LATENCY_CEILING, LATENCY_FAILURES=$LATENCY_FAILURES" "debug"
@@ -716,6 +764,9 @@ main() {
         # Flag to track if recovery was performed this cycle
         local recovery_performed=0
         
+        # Flag to track if latency threshold was reached this cycle (skip failure_count logic)
+        local latency_threshold_reached=0
+        
         # Connection monitoring logic - two separate paths
         local connectivity_ok=0
         
@@ -727,15 +778,30 @@ main() {
                 # Now check if latency is acceptable
                 if [ "$CURRENT_LATENCY" -gt "$LATENCY_CEILING" ]; then
                     LATENCY_FAILURE_COUNT=$((LATENCY_FAILURE_COUNT + 1))
-                    log_message "High latency detected: ${CURRENT_LATENCY}ms > ${LATENCY_CEILING}ms (failures: $LATENCY_FAILURE_COUNT/$LATENCY_FAILURES)" "warn"
+                    log_message "High latency detected: ${CURRENT_LATENCY}ms > ${LATENCY_CEILING}ms (latency failures: $LATENCY_FAILURE_COUNT/$LATENCY_FAILURES)" "warn"
+                    
+                    # Update status to show latency failure count
+                    update_status "warning" "High latency: ${CURRENT_LATENCY}ms (failure $LATENCY_FAILURE_COUNT/$LATENCY_FAILURES)" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
                     
                     # Check if latency failure threshold is reached
-                    if [ $LATENCY_FAILURE_COUNT -ge $LATENCY_FAILURES ]; then
-                        log_message "Latency failure threshold reached ($LATENCY_FAILURE_COUNT/$LATENCY_FAILURES), treating as connectivity failure" "warn"
+                    # Ensure LATENCY_FAILURES is a valid number (default to 3 if not)
+                    local latency_threshold=${LATENCY_FAILURES:-3}
+                    [ -z "$latency_threshold" ] && latency_threshold=3
+                    
+                    if [ "$LATENCY_FAILURE_COUNT" -ge "$latency_threshold" ]; then
+                        log_message "Latency failure threshold reached ($LATENCY_FAILURE_COUNT/$latency_threshold), triggering recovery action" "warn"
                         connectivity_ok=0  # Treat as failure to trigger retry logic
-                        LATENCY_FAILURE_COUNT=0  # Reset latency failure counter
+                        latency_threshold_reached=1  # Skip failure_count logic, go directly to retry
+                        # Note: Don't reset LATENCY_FAILURE_COUNT here - we'll reset it only after successful recovery
                     else
-                        connectivity_ok=1  # Latency high but not threshold yet
+                        # Latency high but threshold not yet reached - connection is still "ok" for now
+                        # But mark that we're in high latency state to avoid overwriting status
+                        connectivity_ok=1
+                        log_message "Latency failure count: $LATENCY_FAILURE_COUNT/$latency_threshold - waiting for threshold" "debug"
+                        # Skip to next cycle - don't fall through to 'else' block which overwrites status
+                        log_message "Sleeping for $PING_INTERVAL seconds before next check" "debug"
+                        sleep $PING_INTERVAL
+                        continue
                     fi
                 else
                     # Latency is acceptable
@@ -751,6 +817,8 @@ main() {
                 log_message "No internet connectivity" "warn"
                 connectivity_ok=0
                 CURRENT_LATENCY=0
+                # Also reset latency failure counter on complete connectivity loss
+                LATENCY_FAILURE_COUNT=0
             fi
         else
             # STANDARD CONNECTION MONITORING MODE
@@ -766,80 +834,79 @@ main() {
         
         # Process connectivity results - unified logic for both modes
         if [ $connectivity_ok -eq 0 ]; then
-            failure_count=$((failure_count + 1))
             
-            # Use appropriate failure threshold based on monitoring mode
-            local failure_threshold
-            if [ $HIGH_LATENCY_MONITORING -eq 1 ]; then
-                failure_threshold=$LATENCY_FAILURES
+            # If latency threshold was reached, skip failure_count logic and go directly to retry
+            if [ $latency_threshold_reached -eq 1 ]; then
+                log_message "Latency threshold triggered - skipping ping failure count, directly incrementing retry" "info"
+                failure_count=0  # Reset failure count
             else
-                failure_threshold=$PING_FAILURES
+                # Normal failure counting for ping failures (no connectivity)
+                failure_count=$((failure_count + 1))
+                
+                # For ping failures (no connectivity), always use PING_FAILURES threshold
+                # LATENCY_FAILURES is only for high-latency-but-connected scenarios
+                local failure_threshold=$PING_FAILURES
+                
+                log_message "Connectivity check failed ($failure_count/$failure_threshold)" "warn"
+                
+                # Update status
+                update_status "warning" "Connection check failed: $failure_count/$failure_threshold failures" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+                
+                # Check if failure threshold is NOT yet reached - continue to next cycle
+                if [ $failure_count -lt $failure_threshold ]; then
+                    # Not enough failures yet, skip to next sleep cycle
+                    log_message "Sleeping for $PING_INTERVAL seconds before next check" "debug"
+                    sleep $PING_INTERVAL
+                    continue
+                fi
+                
+                # Failure threshold reached, reset counter and proceed to retry logic
+                failure_count=0
             fi
             
-            log_message "Connectivity check failed ($failure_count/$failure_threshold)" "warn"
+            # === RETRY LOGIC (reached either via latency threshold or ping failure threshold) ===
             
-            # Update status
-            update_status "warning" "Connection check failed: $failure_count/$failure_threshold failures" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+            # Increment retry counter
+            CURRENT_RETRIES=$((CURRENT_RETRIES + 1))
+            save_retry_count $CURRENT_RETRIES
             
-            # Check if failure threshold is reached
-            if [ $failure_count -ge $failure_threshold ]; then
-                # Reset failure counter
-                failure_count=0
+            log_message "Failure threshold reached. Current retry: $CURRENT_RETRIES/$MAX_RETRIES" "warn"
+            update_status "error" "Connection lost, attempt $CURRENT_RETRIES/$MAX_RETRIES to recover" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
+            
+            # Check if max retries reached
+            if [ $CURRENT_RETRIES -ge $MAX_RETRIES ]; then
+                log_message "Maximum retries reached" "error"
                 
-                # Increment retry counter
-                CURRENT_RETRIES=$((CURRENT_RETRIES + 1))
-                save_retry_count $CURRENT_RETRIES
-                
-                log_message "Failure threshold reached. Current retry: $CURRENT_RETRIES/$MAX_RETRIES" "warn"
-                update_status "error" "Connection lost, attempt $CURRENT_RETRIES/$MAX_RETRIES to recover" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-                
-                # Check if max retries reached
-                if [ $CURRENT_RETRIES -ge $MAX_RETRIES ]; then
-                    log_message "Maximum retries reached" "error"
+                # Try SIM failover if enabled
+                if [ "$AUTO_SIM_FAILOVER" -eq 1 ]; then
+                    log_message "Attempting SIM failover" "info"
+                    update_status "failover" "Maximum retries reached, attempting SIM failover"
                     
-                    # Try SIM failover if enabled
-                    if [ "$AUTO_SIM_FAILOVER" -eq 1 ]; then
-                        log_message "Attempting SIM failover" "info"
-                        update_status "failover" "Maximum retries reached, attempting SIM failover"
-                        
-                        local sim_failover_success=0
-                        if switch_sim_card; then
-                            if [ "$HIGH_LATENCY_MONITORING" -eq 1 ]; then
-                                if check_internet_with_latency && [ "$CURRENT_LATENCY" -le "$LATENCY_CEILING" ]; then
-                                    sim_failover_success=1
-                                fi
-                            else
-                                if check_internet; then
-                                    sim_failover_success=1
-                                fi
+                    local sim_failover_success=0
+                    if switch_sim_card; then
+                        if [ "$HIGH_LATENCY_MONITORING" -eq 1 ]; then
+                            if check_internet_with_latency && [ "$CURRENT_LATENCY" -le "$LATENCY_CEILING" ]; then
+                                sim_failover_success=1
+                            fi
+                        else
+                            if check_internet; then
+                                sim_failover_success=1
                             fi
                         fi
+                    fi
+                    
+                    if [ $sim_failover_success -eq 1 ]; then
+                        log_message "SIM failover successful, connection restored" "info"
+                        update_status "recovered" "Connection restored via SIM failover"
                         
-                        if [ $sim_failover_success -eq 1 ]; then
-                            log_message "SIM failover successful, connection restored" "info"
-                            update_status "recovered" "Connection restored via SIM failover"
-                            
-                            # Reset retry counter
-                            CURRENT_RETRIES=0
-                            save_retry_count $CURRENT_RETRIES
-                        else
-                            log_message "SIM failover failed, system will reboot" "error"
-                            update_status "rebooting" "SIM failover failed, system will reboot"
-                            
-                            # Preserve connection monitor state before reboot
-                            preserve_connection_monitor_state
-                            
-                            # Reset retry counter before reboot
-                            CURRENT_RETRIES=0
-                            save_retry_count $CURRENT_RETRIES
-                            
-                            # Wait briefly and reboot
-                            sleep 5
-                            reboot
-                        fi
+                        # Reset all counters
+                        CURRENT_RETRIES=0
+                        save_retry_count $CURRENT_RETRIES
+                        failure_count=0
+                        LATENCY_FAILURE_COUNT=0
                     else
-                        log_message "Auto SIM failover disabled, system will reboot" "error"
-                        update_status "rebooting" "Maximum retries reached, system will reboot"
+                        log_message "SIM failover failed, system will reboot" "error"
+                        update_status "rebooting" "SIM failover failed, system will reboot"
                         
                         # Preserve connection monitor state before reboot
                         preserve_connection_monitor_state
@@ -853,37 +920,46 @@ main() {
                         reboot
                     fi
                 else
-                    # Handle connection refresh logic
-                    if [ $CURRENT_RETRIES -eq 1 ] && [ "$CONNECTION_REFRESH" -eq 1 ]; then
-                        # First retry with connection refresh enabled - attempt recovery
-                        log_message "First retry with connection refresh enabled, attempting connection recovery" "info"
+                    log_message "Auto SIM failover disabled, system will reboot" "error"
+                    update_status "rebooting" "Maximum retries reached, system will reboot"
+                    
+                    # Preserve connection monitor state before reboot
+                    preserve_connection_monitor_state
+                    
+                    # Reset retry counter before reboot
+                    CURRENT_RETRIES=0
+                    save_retry_count $CURRENT_RETRIES
+                    
+                    # Wait briefly and reboot
+                    sleep 5
+                    reboot
+                fi
+            else
+                # Handle connection refresh logic
+                # Network refresh is attempted on EVERY retry when enabled
+                if [ "$CONNECTION_REFRESH" -eq 1 ]; then
+                    log_message "Retry $CURRENT_RETRIES/$MAX_RETRIES - attempting connection recovery" "info"
+                    
+                    if perform_connection_recovery; then
+                        log_message "Connection recovery successful" "info"
                         
-                        if perform_connection_recovery; then
-                            log_message "Connection recovery successful" "info"
-                            
-                            # Mark that recovery was performed
-                            recovery_performed=1
-                            
-                            # Reset retry counter
-                            CURRENT_RETRIES=0
-                            save_retry_count $CURRENT_RETRIES
-                            
-                            # Reset failure count
-                            failure_count=0
-                        else
-                            log_message "Connection recovery failed, will wait for next cycle" "warn"
-                            update_status "error" "Connection recovery failed, attempt $CURRENT_RETRIES/$MAX_RETRIES" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-                        fi
+                        # Mark that recovery was performed
+                        recovery_performed=1
+                        
+                        # Reset retry counter
+                        CURRENT_RETRIES=0
+                        save_retry_count $CURRENT_RETRIES
+                        
+                        # Reset failure counts
+                        failure_count=0
+                        LATENCY_FAILURE_COUNT=0
                     else
-                        # Either not first retry, or connection refresh disabled - just wait
-                        if [ "$CONNECTION_REFRESH" -eq 1 ]; then
-                            log_message "Connection refresh already attempted, waiting for recovery (attempt $CURRENT_RETRIES/$MAX_RETRIES)" "info"
-                            update_status "error" "Waiting for recovery, attempt $CURRENT_RETRIES/$MAX_RETRIES" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-                        else
-                            log_message "Connection refresh disabled, waiting for max retries (attempt $CURRENT_RETRIES/$MAX_RETRIES)" "info"
-                            update_status "error" "Connection refresh disabled, attempt $CURRENT_RETRIES/$MAX_RETRIES" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
-                        fi
+                        log_message "Connection recovery failed, will continue to next retry" "warn"
+                        update_status "error" "Connection recovery failed, attempt $CURRENT_RETRIES/$MAX_RETRIES" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
                     fi
+                else
+                    log_message "Connection refresh disabled, waiting for max retries (attempt $CURRENT_RETRIES/$MAX_RETRIES)" "info"
+                    update_status "error" "Connection refresh disabled, attempt $CURRENT_RETRIES/$MAX_RETRIES" "$CURRENT_RETRIES" "$MAX_RETRIES" "$CURRENT_LATENCY" "$LATENCY_CEILING"
                 fi
             fi
         else
