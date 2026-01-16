@@ -1,4 +1,4 @@
-Starting package analysis - Tue Dec  9 01:21:56 AM EST 2025
+Starting package analysis - Thu Jan 15 11:23:36 PM EST 2026
 No update needed for atinout (version 0.9.1, MD5: 444eb87488bad1927b6ed069dedf7393, size: 4323)
 No update needed for kmod-wireguard (version 1, MD5: 98e77b68c2f1b5ff46ef7713b4f63a94, size: 789)
 No update needed for libucode20230711 (version 2024.07.22~b610860d-r3, MD5: c38bd45a6aa14a969b7e92f051481d7e, size: 79358)
@@ -17,15 +17,16 @@ No update needed for sdxpinn-firstboot (version 1.0, MD5: aa6815442a0e53efe5c1fe
 No update needed for sdxpinn-mount-fix (version 1.4, MD5: 019d6df8dc1136b86222df0d5723596f, size: 4323)
 No update needed for sdxpinn-patch (version 2.6, MD5: 70b4da65309b8fe0caa7b958e17d04c6, size: 3135)
 No update needed for sdxpinn-quecmanager (version 2.3.4, MD5: 57c8459f23120ce906102157615e9bbc, size: 1535891)
-Updating package info for sdxpinn-quecmanager-beta...
-Updated sdxpinn-quecmanager-beta to version 2.3.8 with MD5: 7ee227f7d26462cc87103ccf4bcae3af and size: 1652776
+No update needed for sdxpinn-quecmanager-beta (version 2.3.8, MD5: 7ee227f7d26462cc87103ccf4bcae3af, size: 1652776)
 No update needed for sms-tool (version 2025.1.19-APmod-iamromulan, MD5: 83dc8bfd2d4ac8d8952a2a95b2be943f, size: 13687)
 No update needed for socat-at-bridge (version 1.2.0, MD5: eccb5b567c5fd7969ebedbef3c6fdebb, size: 1445)
-No update needed for tailscale (version 1.90.6, MD5: 9de40f63cb3de497dd3c951b645dee11, size: 12419458)
-No update needed for tailscaled (version 1.90.6, MD5: 47dbaeed41306ead365110376e09753f, size: 18033687)
+Updating package info for tailscale...
+Updated tailscale to version 1.92.5 with MD5: 5228ca75ab97fa4ff3c477114214774e and size: 12496729
+Updating package info for tailscaled...
+Updated tailscaled to version 1.92.5 with MD5: 50703f55ae2b7e859765162f0027d813 and size: 18180155
 No update needed for ucode-mod-lua (version 1, MD5: cd83c6848867112332d1155b4c4f0640, size: 10085)
 No update needed for warp (version 1.0, MD5: ea95658bf84f619cabe5dd62280fe787, size: 2698)
 No update needed for websocat (version 1.14.0, MD5: e877135ca393c19a17ee81966d88ec38, size: 3067044)
 No update needed for wgcf (version 2.2.24, MD5: b2ba181f9181c2bd8f37933c60c0713f, size: 3677883)
 Package file and signature updated successfully.
-Package analysis completed - Tue Dec  9 01:21:57 AM EST 2025
+Package analysis completed - Thu Jan 15 11:23:37 PM EST 2026
