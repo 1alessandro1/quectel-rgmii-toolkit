@@ -198,6 +198,14 @@ else
 fi
 }
 
+wan_all_firewall_patch() {
+uci show firewall | grep "\.src='wan_all'" | sed "s/firewall\.@rule\[\([0-9]*\)\]\.src.*/\1/" | while read i; do
+    uci set firewall.@rule[$i].enabled='0'
+done
+uci commit firewall
+/etc/init.d/firewall restart
+}
+
 
 # Begin Patch Process 
 echo -e "\e[92mBegining sdxpinn-patch process...\e[0m"
@@ -210,5 +218,8 @@ echo -e "\e[92mEnsuring mount-fix does not have a prerm\e[0m"
 noprerm_mount_fix
 echo -e "\e[92mEnsuring opkg reconizes needed archs\e[0m"
 opkg_arch_patch
+echo -e "\e[92mDisabling all firewall rules with a source of wan_all\e[0m"
+echo -e "\e[92mThis should close down access to the system via WAN/Cellular\e[0m"
+wan_all_firewall_patch
 echo -e "\e[92msdxpinn-patch process complete.\e[0m"
 exit 0
